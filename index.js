@@ -1,21 +1,36 @@
-// ===== FULL HACK FIX (Node 18 + selfbot) =====
+// ===== FULL FIX (Node 18 + selfbot stable) =====
+
+// File fix
 if (typeof File === 'undefined') {
   global.File = class File {};
 }
 
+// toWellFormed fix
 if (!String.prototype.toWellFormed) {
   String.prototype.toWellFormed = function () {
     return this;
   };
 }
 
-if (typeof fetch === 'undefined') {
-  const undici = require('undici');
-  global.fetch = undici.fetch;
-  global.Headers = undici.Headers;
-  global.Request = undici.Request;
-  global.Response = undici.Response;
-}
+// 🔥 fetch / Request fix (สำคัญมาก)
+const undici = require('undici');
+
+global.fetch = undici.fetch;
+global.Headers = undici.Headers;
+global.Request = undici.Request;
+global.Response = undici.Response;
+
+globalThis.fetch = undici.fetch;
+globalThis.Headers = undici.Headers;
+globalThis.Request = undici.Request;
+globalThis.Response = undici.Response;
+
+// (fallback เผื่อบาง env)
+try {
+  const { Blob } = require('buffer');
+  global.Blob = Blob;
+  globalThis.Blob = Blob;
+} catch {}
 
 // ===== IMPORTS =====
 require('dotenv').config();
@@ -61,7 +76,7 @@ function destroyConnection(guildId) {
     if (old) old.destroy();
     connection = null;
   } catch (e) {
-    console.error(e);
+    console.error("Destroy error:", e);
   }
 }
 
@@ -103,7 +118,10 @@ function scheduleReconnect(delay = 3000) {
 
   reconnectTimer = setTimeout(async () => {
     reconnectTimer = null;
-    if (!currentVoiceChannelId) await connectToVoiceChannel();
+    if (!currentVoiceChannelId) {
+      console.log("🔄 reconnecting...");
+      await connectToVoiceChannel();
+    }
   }, delay);
 }
 
@@ -128,7 +146,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
     }
 
   } catch (err) {
-    console.error(err);
+    console.error("voiceState error:", err);
   }
 });
 
@@ -139,16 +157,15 @@ client.on('messageCreate', async (message) => {
     if (message.author.id === client.user.id) return;
     if (!message.guild) return;
 
-    // ✅ mention check (correct)
     if (!message.mentions.users.has(client.user.id)) return;
 
-    // ✅ cooldown (3s / channel)
     const now = Date.now();
     const last = cooldown.get(message.channel.id) || 0;
     if (now - last < 3000) return;
     cooldown.set(message.channel.id, now);
 
     await message.channel.send("yes");
+
     console.log(`💬 yes -> #${message.channel.name}`);
 
   } catch (err) {
