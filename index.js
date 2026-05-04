@@ -1,4 +1,4 @@
-// ===== QUICK HACK FIX =====
+// ===== FULL HACK FIX (Node 18 + selfbot) =====
 if (typeof File === 'undefined') {
   global.File = class File {};
 }
@@ -9,13 +9,21 @@ if (!String.prototype.toWellFormed) {
   };
 }
 
+if (typeof fetch === 'undefined') {
+  const undici = require('undici');
+  global.fetch = undici.fetch;
+  global.Headers = undici.Headers;
+  global.Request = undici.Request;
+  global.Response = undici.Response;
+}
+
 // ===== IMPORTS =====
 require('dotenv').config();
 const { Client } = require('discord.js-selfbot-v13');
 const { joinVoiceChannel, getVoiceConnection } = require('@discordjs/voice');
 const express = require("express");
 
-// ===== GLOBAL ERROR HANDLER =====
+// ===== GLOBAL ERROR =====
 process.on('uncaughtException', console.error);
 process.on('unhandledRejection', console.error);
 
@@ -24,7 +32,7 @@ const app = express();
 const port = process.env.PORT || 3500;
 
 app.get('/', (_, res) => res.send('Bot is running'));
-app.listen(port, () => console.log(`🌐 Express server listening on port ${port}`));
+app.listen(port, () => console.log(`🌐 Express server on ${port}`));
 
 // ===== CLIENT =====
 const client = new Client();
@@ -38,8 +46,6 @@ let currentVoiceChannelId = null;
 let isConnecting = false;
 let reconnectTimer = null;
 let connection = null;
-
-// ===== COOLDOWN =====
 const cooldown = new Map();
 
 // ===== MEMORY =====
@@ -54,8 +60,8 @@ function destroyConnection(guildId) {
     const old = getVoiceConnection(guildId);
     if (old) old.destroy();
     connection = null;
-  } catch (err) {
-    console.error("Destroy error:", err);
+  } catch (e) {
+    console.error(e);
   }
 }
 
@@ -86,7 +92,7 @@ async function connectToVoiceChannel() {
     console.log(`📢 Joined: ${channel.name}`);
 
   } catch (err) {
-    console.error(err);
+    console.error("Voice error:", err);
   } finally {
     isConnecting = false;
   }
@@ -103,7 +109,7 @@ function scheduleReconnect(delay = 3000) {
 
 // ===== EVENTS =====
 client.on('ready', async () => {
-  console.log(`✅ ${client.user.username} is online`);
+  console.log(`✅ ${client.user.username} online`);
   await connectToVoiceChannel();
 });
 
@@ -116,7 +122,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
     if (!newState.channelId && oldState.channelId) {
       currentVoiceChannelId = null;
       destroyConnection(serverId);
-      scheduleReconnect(3000);
+      scheduleReconnect();
     } else if (newState.channelId !== oldState.channelId) {
       currentVoiceChannelId = newState.channelId;
     }
@@ -133,10 +139,10 @@ client.on('messageCreate', async (message) => {
     if (message.author.id === client.user.id) return;
     if (!message.guild) return;
 
-    // ✅ FIX mention check
+    // ✅ mention check (correct)
     if (!message.mentions.users.has(client.user.id)) return;
 
-    // ✅ cooldown 3s / channel
+    // ✅ cooldown (3s / channel)
     const now = Date.now();
     const last = cooldown.get(message.channel.id) || 0;
     if (now - last < 3000) return;
@@ -146,7 +152,7 @@ client.on('messageCreate', async (message) => {
     console.log(`💬 yes -> #${message.channel.name}`);
 
   } catch (err) {
-    console.error("Mention reply error:", err);
+    console.error("Reply error:", err);
   }
 });
 
