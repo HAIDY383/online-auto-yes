@@ -1,4 +1,9 @@
-// ===== FULL FIX (Node 18 + selfbot stable) =====
+// ===== THE ULTIMATE FIX FOR NODE 18+ =====
+// เราต้องลบ Native Fetch ของ Node 18 ออกเพื่อให้ library ทำงานได้
+delete global.fetch;
+delete global.Headers;
+delete global.Request;
+delete global.Response;
 
 // File fix
 if (typeof File === 'undefined') {
@@ -151,7 +156,8 @@ client.on('messageCreate', async (message) => {
     if (now - last < 3000) return;
     cooldown.set(message.channel.id, now);
 
-    await message.channel.send("yes");
+    // ใช้ .then().catch() เพื่อดู error เฉพาะจุดนี้
+    await message.channel.send("yes").catch(e => console.error("Send Error Details:", e));
 
     console.log(`💬 yes -> #${message.channel.name}`);
 
