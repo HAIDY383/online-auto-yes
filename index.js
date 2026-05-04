@@ -12,19 +12,6 @@ if (!String.prototype.toWellFormed) {
   };
 }
 
-// 🔥 fetch / Request fix (สำคัญมาก)
-const undici = require('undici');
-
-global.fetch = undici.fetch;
-global.Headers = undici.Headers;
-global.Request = undici.Request;
-global.Response = undici.Response;
-
-globalThis.fetch = undici.fetch;
-globalThis.Headers = undici.Headers;
-globalThis.Request = undici.Request;
-globalThis.Response = undici.Response;
-
 // (fallback เผื่อบาง env)
 try {
   const { Blob } = require('buffer');
