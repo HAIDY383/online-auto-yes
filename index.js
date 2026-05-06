@@ -283,6 +283,11 @@ client.on('messageCreate', async (message) => {
     
     cooldown.set(message.channel.id, now);
 
+    console.log(`⏳ Waiting 10 seconds before replying to ${message.author.tag} in #${message.channel.name}`);
+
+    // รอ 10 วิ ก่อนตอบ
+    await new Promise(resolve => setTimeout(resolve, 10000));
+
     // Send reply
     await message.channel.send("yes").catch(e => {
       console.error(`❌ Failed to send message in #${message.channel.name}:`, e.message);
