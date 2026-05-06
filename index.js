@@ -264,16 +264,13 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
 // ===== AUTO REPLY SYSTEM =====
 client.on('messageCreate', async (message) => {
   try {
-    // Basic checks
     if (!client.user) return;
     if (message.author.id === client.user.id) return;
     if (!message.guild) return;
     if (message.guild.id !== serverId) return;
     
-    // Check if mentioned
     if (!message.mentions.users.has(client.user.id)) return;
 
-    // Cooldown check
     const now = Date.now();
     const lastReply = cooldown.get(message.channel.id) || 0;
     if (now - lastReply < 3000) {
@@ -283,10 +280,17 @@ client.on('messageCreate', async (message) => {
     
     cooldown.set(message.channel.id, now);
 
-    console.log(`⏳ Waiting 10 seconds before replying to ${message.author.tag} in #${message.channel.name}`);
+    // ✅ เพิ่ม timestamp เริ่มต้น
+    const startTime = new Date();
+    console.log(`[${startTime.toISOString()}] ⏳ Received mention from ${message.author.tag}, waiting 10s...`);
 
     // รอ 10 วิ ก่อนตอบ
     await new Promise(resolve => setTimeout(resolve, 10000));
+
+    // ✅ เพิ่ม timestamp สิ้นสุด
+    const endTime = new Date();
+    const diff = (endTime - startTime) / 1000;
+    console.log(`[${endTime.toISOString()}] ⏱️ Waited ${diff.toFixed(1)}s, now replying...`);
 
     // Send reply
     await message.channel.send("yes").catch(e => {
