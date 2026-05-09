@@ -1,9 +1,7 @@
 // ===== NODE VERSION CHECK & SAFE POLYFILL =====
 const nodeVersion = parseInt(process.versions.node.split('.')[0]);
-
 console.log(`🔍 Running on Node.js v${process.versions.node}`);
 
-// เฉพาะ Node < 18 ค่อยลง polyfill
 if (nodeVersion < 18) {
   console.log('📦 Node < 18 detected, loading polyfills...');
   try {
@@ -20,7 +18,6 @@ if (nodeVersion < 18) {
   }
 }
 
-// Fix for File API (Node.js ไม่มี built-in)
 if (typeof File === 'undefined') {
   global.File = class File {
     constructor(bits, name, options = {}) {
@@ -30,27 +27,25 @@ if (typeof File === 'undefined') {
       this.lastModified = options.lastModified || Date.now();
     }
   };
-  console.log('📝 File API polyfill loaded');
 }
 
-// Fix for Blob (Node 15+ มีใน buffer)
 if (typeof Blob === 'undefined') {
   try {
     const { Blob: BufferBlob } = require('buffer');
     global.Blob = BufferBlob;
     globalThis.Blob = BufferBlob;
-    console.log('📝 Blob from buffer loaded');
   } catch (e) {
     console.error('⚠️ Blob not available:', e.message);
   }
 }
 
-// String.prototype.toWellFormed polyfill
 if (!String.prototype.toWellFormed) {
-  String.prototype.toWellFormed = function() {
-    return this.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '\uFFFD');
+  String.prototype.toWellFormed = function () {
+    return this.replace(
+      /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g,
+      '\uFFFD'
+    );
   };
-  console.log('📝 String.toWellFormed polyfill loaded');
 }
 
 // ===== IMPORTS =====
@@ -64,68 +59,91 @@ process.on('uncaughtException', (error) => {
   console.error('❌ Uncaught Exception:', error);
 });
 
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
+process.on('unhandledRejection', (reason) => {
+  console.error('❌ Unhandled Rejection:', reason);
 });
 
+// ===== CONFIG =====
+const serverId    = process.env.server;
+const voiceChannelId = process.env.id;
+const token       = process.env.token;
+
+if (!serverId || !voiceChannelId || !token) {
+  console.error('❌ Missing environment variables! Required: server, id, token');
+  process.exit(1);
+}
+
+// ===== STATE =====
+let currentVoiceChannelId = null;
+let isConnecting          = false;
+let reconnectAttempts     = 0;
+let reconnectTimer        = null;       // FIX: ใช้จริง ไว้ cancel ได้
+let memoryInterval        = null;       // FIX: เก็บ ref เพื่อ clearInterval ตอน shutdown
+let isShuttingDown        = false;
+
+const MAX_RECONNECT_ATTEMPTS = 10;
+const COOLDOWN_MS            = 3000;
+const COOLDOWN_TTL_MS        = 10000;  // FIX: TTL สำหรับ evict cooldown entries
+
+// FIX: cooldown Map พร้อม TTL eviction ป้องกัน memory leak
+const cooldown = new Map();
+
+function setCooldown(channelId) {
+  // ลบ timer เก่าถ้ามี
+  const old = cooldown.get(channelId);
+  if (old?.timer) clearTimeout(old.timer);
+
+  const timer = setTimeout(() => cooldown.delete(channelId), COOLDOWN_TTL_MS);
+  cooldown.set(channelId, { ts: Date.now(), timer });
+}
+
+function isOnCooldown(channelId) {
+  const entry = cooldown.get(channelId);
+  if (!entry) return false;
+  return Date.now() - entry.ts < COOLDOWN_MS;
+}
+
 // ===== EXPRESS SERVER =====
-const app = express();
+const app  = express();
 const port = process.env.PORT || 3500;
 
-app.get('/', (req, res) => res.json({ 
-  status: 'online', 
-  uptime: process.uptime(),
-  nodeVersion: process.versions.node 
+app.get('/', (_req, res) => res.json({
+  status:       'online',
+  uptime:       process.uptime(),
+  nodeVersion:  process.versions.node,
 }));
 
-app.get('/health', (req, res) => res.json({ 
-  status: 'healthy',
+app.get('/health', (_req, res) => res.json({
+  status:        'healthy',
   voiceConnected: !!currentVoiceChannelId,
-  memory: process.memoryUsage().heapUsed / 1024 / 1024
+  reconnectAttempts,
+  cooldownSize:  cooldown.size,
+  memory:        Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
 }));
 
-app.listen(port, () => {
+const server = app.listen(port, () => {
   console.log(`🌐 Express server running on port ${port}`);
 });
 
 // ===== DISCORD CLIENT =====
-const client = new Client({
-  checkUpdate: false,
-  intents: []
-});
+const client = new Client({ checkUpdate: false, intents: [] });
 
-// ===== CONFIG =====
-const serverId = process.env.server;
-const voiceChannelId = process.env.id;
-const token = process.env.token;
-
-// Validate config
-if (!serverId || !voiceChannelId || !token) {
-  console.error('❌ Missing environment variables!');
-  console.log('Required: server, id, token');
-  process.exit(1);
-}
-
-// ===== STATE MANAGEMENT =====
-let currentVoiceChannelId = null;
-let isConnecting = false;
-let reconnectTimer = null;
-let reconnectAttempts = 0;
-const MAX_RECONNECT_ATTEMPTS = 10;
-const cooldown = new Map();
-
-// ===== MEMORY MONITORING =====
-setInterval(() => {
+// ===== MEMORY MONITORING (ต้องเก็บ ref ไว้ clear ได้) =====
+memoryInterval = setInterval(() => {
   const used = process.memoryUsage();
-  console.log(`🧠 Memory Usage: ${Math.round(used.heapUsed / 1024 / 1024)}MB / ${Math.round(used.heapTotal / 1024 / 1024)}MB`);
+  console.log(
+    `🧠 Heap: ${Math.round(used.heapUsed / 1024 / 1024)}MB` +
+    ` / ${Math.round(used.heapTotal / 1024 / 1024)}MB` +
+    ` | Cooldown entries: ${cooldown.size}`
+  );
 }, 30000);
 
-// ===== VOICE CONNECTION MANAGEMENT =====
+// ===== VOICE =====
 function destroyConnection(guildId) {
   try {
-    const old = getVoiceConnection(guildId);
-    if (old) {
-      old.destroy();
+    const conn = getVoiceConnection(guildId);
+    if (conn) {
+      conn.destroy();
       console.log('🔌 Voice connection destroyed');
     }
   } catch (e) {
@@ -133,77 +151,82 @@ function destroyConnection(guildId) {
   }
 }
 
+// FIX: schedule reconnect ผ่านฟังก์ชันเดียว ป้องกัน timer ซ้อน
+function scheduleReconnect() {
+  if (isShuttingDown) return;
+  if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+    console.error('❌ Max reconnection attempts reached — giving up');
+    return;
+  }
+
+  // FIX: cancel pending timer ก่อนจะ schedule ใหม่เสมอ
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+
+  const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
+  reconnectAttempts++;
+  console.log(`🔄 Reconnect scheduled in ${delay / 1000}s (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`);
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    connectToVoiceChannel();
+  }, delay);
+}
+
 async function connectToVoiceChannel() {
+  if (isShuttingDown) return;
   if (isConnecting) {
     console.log('⏳ Already attempting to connect...');
     return;
   }
-  
+
   isConnecting = true;
-  
+
   try {
     const guild = client.guilds.cache.get(serverId);
-    if (!guild) {
-      console.error('❌ Server not found!');
-      return;
-    }
+    if (!guild) { console.error('❌ Server not found!'); return; }
 
     const channel = guild.channels.cache.get(voiceChannelId);
-    if (!channel) {
-      console.error('❌ Voice channel not found!');
-      return;
-    }
+    if (!channel) { console.error('❌ Voice channel not found!'); return; }
 
     if (channel.type !== 'GUILD_VOICE' && channel.type !== 2) {
       console.error('❌ Channel is not a voice channel!');
       return;
     }
 
-    // Check if already connected to this channel
+    // ถ้า connection ยังดีอยู่ ไม่ต้อง reconnect
     if (currentVoiceChannelId === channel.id) {
-      const existingConn = getVoiceConnection(guild.id);
-      if (existingConn && existingConn.state.status !== VoiceConnectionStatus.Destroyed) {
+      const existing = getVoiceConnection(guild.id);
+      if (existing && existing.state.status !== VoiceConnectionStatus.Destroyed) {
         console.log('✅ Already connected to target channel');
         return;
       }
     }
 
-    // Destroy old connection if exists
     destroyConnection(guild.id);
 
-    // Create new connection
     const connection = joinVoiceChannel({
-      channelId: channel.id,
-      guildId: guild.id,
+      channelId:      channel.id,
+      guildId:        guild.id,
       adapterCreator: guild.voiceAdapterCreator,
-      selfMute: true,
-      selfDeaf: true
+      selfMute:       true,
+      selfDeaf:       true,
     });
 
-    // Monitor connection state
     connection.on(VoiceConnectionStatus.Ready, () => {
-      console.log(`📢 Successfully connected to: ${channel.name}`);
+      console.log(`📢 Connected to: ${channel.name}`);
       currentVoiceChannelId = channel.id;
-      reconnectAttempts = 0;
+      reconnectAttempts     = 0;     // FIX: reset เมื่อ ready จริงๆ
+      // cancel pending reconnect timer ถ้ายังค้างอยู่
+      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
     });
 
     connection.on(VoiceConnectionStatus.Disconnected, async () => {
       console.log('🔌 Disconnected from voice channel');
       currentVoiceChannelId = null;
-      
-      // Try to reconnect
-      try {
-        await connection.destroy();
-      } catch (e) {}
-
-      if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-        const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
-        console.log(`🔄 Reconnecting in ${delay/1000}s... (Attempt ${reconnectAttempts + 1}/${MAX_RECONNECT_ATTEMPTS})`);
-        reconnectAttempts++;
-        setTimeout(() => connectToVoiceChannel(), delay);
-      } else {
-        console.error('❌ Max reconnection attempts reached');
-      }
+      try { await connection.destroy(); } catch (_) {}
+      scheduleReconnect();           // FIX: ไปผ่าน scheduleReconnect เสมอ
     });
 
     connection.on('error', (error) => {
@@ -212,6 +235,7 @@ async function connectToVoiceChannel() {
 
   } catch (err) {
     console.error('❌ Error connecting to voice:', err.message);
+    scheduleReconnect();
   } finally {
     isConnecting = false;
   }
@@ -220,39 +244,33 @@ async function connectToVoiceChannel() {
 // ===== CLIENT EVENTS =====
 client.on('ready', async () => {
   console.log(`✅ Logged in as: ${client.user.tag} (${client.user.id})`);
-  console.log(`📊 Bot ready at: ${new Date().toLocaleString()}`);
-  
   await connectToVoiceChannel();
 });
 
 client.on('voiceStateUpdate', async (oldState, newState) => {
   try {
-    // Ignore updates from other users or servers
     if (!client.user) return;
     if (newState?.member?.id !== client.user.id) return;
-    if (newState?.guild?.id !== serverId) return;
 
-    // Disconnected from voice
+    // FIX: ใช้ guild.id จาก state โดยตรง ไม่ใช้ serverId string
+    const guildId = newState?.guild?.id ?? oldState?.guild?.id;
+    if (guildId !== serverId) return;
+
+    // Left voice
     if (!newState.channelId && oldState.channelId) {
       console.log('👋 Left voice channel');
       currentVoiceChannelId = null;
-      destroyConnection(serverId);
-      
-      // Schedule reconnect
-      setTimeout(() => {
-        if (!currentVoiceChannelId) {
-          console.log('🔄 Reconnecting to voice...');
-          connectToVoiceChannel();
-        }
-      }, 3000);
-    } 
-    // Moved to different channel
-    else if (newState.channelId !== oldState.channelId) {
-      console.log(`🔀 Moved to different voice channel: ${newState.channelId}`);
+      destroyConnection(guildId);
+
+      // FIX: ผ่าน scheduleReconnect ไม่ใช้ setTimeout ตรงๆ
+      scheduleReconnect();
+    }
+    // Moved channels
+    else if (newState.channelId && newState.channelId !== oldState.channelId) {
+      console.log(`🔀 Moved to channel: ${newState.channelId}`);
       if (newState.channelId === voiceChannelId) {
         currentVoiceChannelId = newState.channelId;
-      } else if (newState.channelId) {
-        // Moved to wrong channel, move back
+      } else {
         await connectToVoiceChannel();
       }
     }
@@ -261,74 +279,77 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
   }
 });
 
-// ===== AUTO REPLY SYSTEM =====
+// ===== AUTO REPLY =====
 client.on('messageCreate', async (message) => {
   try {
     if (!client.user) return;
     if (message.author.id === client.user.id) return;
     if (!message.guild) return;
     if (message.guild.id !== serverId) return;
-    
     if (!message.mentions.users.has(client.user.id)) return;
 
-    const now = Date.now();
-    const lastReply = cooldown.get(message.channel.id) || 0;
-    if (now - lastReply < 3000) {
+    // FIX: ใช้ cooldown ที่มี TTL
+    if (isOnCooldown(message.channel.id)) {
       console.log(`⏰ Cooldown active for #${message.channel.name}`);
       return;
     }
-    
-    cooldown.set(message.channel.id, now);
+    setCooldown(message.channel.id);
 
-    // ✅ เพิ่ม timestamp เริ่มต้น
-    const startTime = new Date();
-    console.log(`[${startTime.toISOString()}] ⏳ Received mention from ${message.author.tag}, waiting 10s...`);
+    const startTime = Date.now();
+    console.log(`[${new Date().toISOString()}] ⏳ Mention from ${message.author.tag}, waiting 10s...`);
 
-    // รอ 10 วิ ก่อนตอบ
     await new Promise(resolve => setTimeout(resolve, 10000));
 
-    // ✅ เพิ่ม timestamp สิ้นสุด
-    const endTime = new Date();
-    const diff = (endTime - startTime) / 1000;
-    console.log(`[${endTime.toISOString()}] ⏱️ Waited ${diff.toFixed(1)}s, now replying...`);
+    // FIX: เช็ค bot ยังทำงานอยู่หลัง await
+    if (isShuttingDown || !client.user) return;
 
-    // Send reply
-    await message.channel.send("yes").catch(e => {
-      console.error(`❌ Failed to send message in #${message.channel.name}:`, e.message);
+    const diff = ((Date.now() - startTime) / 1000).toFixed(1);
+    console.log(`[${new Date().toISOString()}] ⏱️ Waited ${diff}s, replying...`);
+
+    await message.channel.send('yes').catch(e => {
+      console.error(`❌ Failed to send in #${message.channel.name}:`, e.message);
     });
 
-    console.log(`💬 Replied "yes" to ${message.author.tag} in #${message.channel.name}`);
+    console.log(`💬 Replied to ${message.author.tag} in #${message.channel.name}`);
 
   } catch (err) {
     console.error('❌ Reply error:', err.message);
   }
 });
 
-// ===== ERROR LOGGING =====
-client.on('error', (error) => {
-  console.error('❌ Client error:', error.message);
-});
-
-client.on('warn', (warning) => {
-  console.warn('⚠️ Warning:', warning);
-});
+client.on('error', (error) => console.error('❌ Client error:', error.message));
+client.on('warn',  (warning) => console.warn('⚠️ Warning:', warning));
 
 // ===== GRACEFUL SHUTDOWN =====
-process.on('SIGINT', () => {
-  console.log('\n🛑 Shutting down gracefully...');
+function shutdown(signal) {
+  console.log(`\n🛑 ${signal} received — shutting down...`);
+  isShuttingDown = true;
+
+  // FIX: clear interval + timer ป้องกัน timer leak
+  if (memoryInterval) { clearInterval(memoryInterval); memoryInterval = null; }
+  if (reconnectTimer)  { clearTimeout(reconnectTimer);  reconnectTimer  = null; }
+
+  // clear cooldown timers
+  for (const [, entry] of cooldown) {
+    if (entry?.timer) clearTimeout(entry.timer);
+  }
+  cooldown.clear();
+
   destroyConnection(serverId);
   client.destroy();
-  process.exit(0);
-});
+  server.close(() => {
+    console.log('🌐 HTTP server closed');
+    process.exit(0);
+  });
 
-process.on('SIGTERM', () => {
-  console.log('\n🛑 Shutting down gracefully...');
-  destroyConnection(serverId);
-  client.destroy();
-  process.exit(0);
-});
+  // force exit ถ้า close ไม่เสร็จใน 5s
+  setTimeout(() => process.exit(0), 5000).unref();
+}
 
-// ===== START BOT =====
+process.on('SIGINT',  () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+
+// ===== START =====
 console.log('🚀 Starting bot...');
 client.login(token).catch(err => {
   console.error('❌ Failed to login:', err.message);
